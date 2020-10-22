@@ -1,3 +1,7 @@
+# :traffic_light: Moved to [`gql-dart/gql/links/gql_dio_link`](https://github.com/gql-dart/gql/blob/master/links/gql_dio_link/README.md).
+## :tada:	 gql_dio_link is now part of the gql family.
+## :information_source: Please go to [`gql-dart/gql`](https://github.com/gql-dart/gql) for more info.
+
 Similar to [`gql_http_link`](https://pub.dev/packages/gql_http_link), This is a GQL Terminating Link to execute requests via Dio using JSON.
 
 ## Usage
