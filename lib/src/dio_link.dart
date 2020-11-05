@@ -1,3 +1,4 @@
+import 'dart:convert';
 import "package:dio/dio.dart" as dio;
 import "package:gql_exec/gql_exec.dart";
 import "package:gql_link/gql_link.dart";
@@ -18,7 +19,8 @@ class HttpLinkHeaders extends ContextEntry {
   }) : assert(headers != null);
 
   @override
-  List<Object> get fieldsForEquality => [
+  List<Object> get fieldsForEquality =>
+      [
         headers,
       ];
 }
@@ -34,13 +36,15 @@ class DioLinkResponseContext extends ContextEntry {
   }) : assert(statusCode != null);
 
   @override
-  List<Object> get fieldsForEquality => [
+  List<Object> get fieldsForEquality =>
+      [
         statusCode,
       ];
 }
 
 extension _CastDioResponse on dio.Response {
-  dio.Response<T> castData<T>() => dio.Response<T>(
+  dio.Response<T> castData<T>() =>
+      dio.Response<T>(
         data: data as T,
         headers: headers,
         request: request,
@@ -71,8 +75,7 @@ class DioLink extends Link {
   /// Dio client instance.
   final dio.Dio client;
 
-  DioLink(
-    this.endpoint, {
+  DioLink(this.endpoint, {
     @required this.client,
     this.defaultHeaders = const {},
     this.serializer = const RequestSerializer(),
@@ -81,15 +84,11 @@ class DioLink extends Link {
 
   @override
   Stream<Response> request(Request request, [forward]) async* {
+    final dio.RequestOptions dioRequest = _prepareRequest(request);
     final dio.Response<Map<String, dynamic>> dioResponse =
-        await _excuteDioRequest(
-      body: _serializeRequest(request),
-      headers: <String, String>{
-        "Content-type": "application/json",
-        "Accept": "*/*",
-        ...defaultHeaders,
-        ..._getHttpLinkHeaders(request),
-      },
+    await _excuteDioRequest(
+      body: dioRequest.data,
+      headers: dioRequest.headers,
     );
 
     if (dioResponse.statusCode >= 300 ||
@@ -109,10 +108,61 @@ class DioLink extends Link {
     );
   }
 
-  Context _updateResponseContext(
-    Response response,
-    dio.Response httpResponse,
-  ) {
+  dio.RequestOptions _prepareRequest(Request request) {
+    try {
+      final headers = {
+        "Accept": "*/*",
+        ...defaultHeaders,
+        ..._getHttpLinkHeaders(request),
+      };
+
+      final body = _encodeAttempter(
+        request,
+        serializer.serializeRequest,
+      )(request);
+
+      final fileMap = extractFlattenedFileMap(body);
+      if (!fileMap.isNotEmpty) {
+        headers["Content-type"] = "application/json";
+        return dio.RequestOptions(
+            data: _serializeRequest(request), headers: headers);
+      }
+
+      var formData = dio.FormData();
+      var operations = json.encode(body, toEncodable: (dynamic object) {
+        if (object is dio.MultipartFile) {
+          return null;
+        }
+        return object.toJson();
+      });
+
+      formData.fields.add(MapEntry('operations', operations));
+
+      final Map<String, List<String>> fileMapping = <String, List<String>>{};
+
+      int i = 0;
+      fileMap.forEach((key, value) {
+        final String indexString = i.toString();
+        fileMapping.addAll(<String, List<String>>{
+          indexString: <String>[key],
+        });
+        formData.files.add(MapEntry(i.toString(), value));
+        i++;
+      });
+
+      formData.fields.add(MapEntry('map', json.encode(fileMapping)));
+
+      return dio.RequestOptions(data: formData, headers: headers);
+    } catch (e) {
+      throw RequestFormatException(
+        originalException: e,
+        request: request,
+      );
+    }
+  }
+
+  Context _updateResponseContext(Response response,
+      dio.Response httpResponse,) {
     try {
       return response.context.withEntry(
         DioLinkResponseContext(
@@ -127,7 +177,7 @@ class DioLink extends Link {
   }
 
   Future<dio.Response<Map<String, dynamic>>> _excuteDioRequest({
-    @required Map<String, dynamic> body,
+    @required dynamic body,
     @required Map<String, String> headers,
   }) async {
     try {
@@ -142,7 +192,7 @@ class DioLink extends Link {
       );
       if (res.data is Map<String, dynamic> == false) {
         throw DioLinkParserException(
-            // ignore: prefer_adjacent_string_concatenation
+          // ignore: prefer_adjacent_string_concatenation
             originalException: "Expected response data to be of type " +
                 "'Map<String, dynamic>' but found ${res.data.runtimeType}",
             response: res);
@@ -216,4 +266,65 @@ class DioLink extends Link {
   void close({bool force = false}) {
     client?.close(force: force);
   }
+}
+
+/// wrap an encoding transform in exception handling
+T Function(V) _encodeAttempter<T, V>(Request request,
+    T Function(V) encoder,) =>
+        (V input) {
+      try {
+        return encoder(input);
+      } catch (e) {
+        throw RequestFormatException(
+          originalException: e,
+          request: request,
+        );
+      }
+    };
+
+Map<String, dio.MultipartFile> extractFlattenedFileMap(dynamic body, {
+  Map<String, dio.MultipartFile> currentMap,
+  List<String> currentPath = const <String>[],
+}) {
+  currentMap ??= <String, dio.MultipartFile>{};
+  if (body is Map<String, dynamic>) {
+    final Iterable<MapEntry<String, dynamic>> entries = body.entries;
+    for (final MapEntry<String, dynamic> element in entries) {
+      currentMap.addAll(extractFlattenedFileMap(
+        element.value,
+        currentMap: currentMap,
+        currentPath: List<String>.from(currentPath)
+          ..add(element.key),
+      ));
+    }
+    return currentMap;
+  }
+  if (body is List<dynamic>) {
+    for (int i = 0; i < body.length; i++) {
+      currentMap.addAll(extractFlattenedFileMap(
+        body[i],
+        currentMap: currentMap,
+        currentPath: List<String>.from(currentPath)
+          ..add(i.toString()),
+      ));
+    }
+    return currentMap;
+  }
+
+  if (body is dio.MultipartFile) {
+    return currentMap
+      ..addAll({
+        currentPath.join("."): body,
+      });
+  }
+
+  assert(
+  body is String || body is num || body == null,
+  "$body of type ${body.runtimeType} was found "
+      "in in the request at path ${currentPath.join(".")}, "
+      "but the only the types { Map, List, MultipartFile, String, num, null } "
+      "are allowed",
+  );
+
+  return currentMap;
 }
